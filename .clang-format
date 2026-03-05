@@ -1,0 +1,101 @@
+# Base style (LLVM is compact and predictable; easier to diff)
+BasedOnStyle:    LLVM
+
+# Keep lines reasonably short to reduce noisy reflows
+ColumnLimit:     100
+
+# Indentation
+IndentWidth:     4
+ContinuationIndentWidth: 8
+TabWidth:        4
+UseTab:          Never
+
+AccessModifierOffset: -4
+IndentAccessModifiers: false
+EmptyLineAfterAccessModifier: Never
+
+# Braces – predictable and explicit
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass:            false
+  AfterStruct:           false
+  AfterEnum:             false
+  AfterFunction:         false
+  AfterNamespace:        false
+  AfterControlStatement: false
+  AfterUnion:            false
+  BeforeCatch:           false
+  BeforeElse:            false
+  IndentBraces:          false
+  SplitEmptyFunction:    false
+  SplitEmptyRecord:      false
+  SplitEmptyNamespace:   false
+
+# Always break after return type for definitions (reduces diffs on rename/type change)
+AlwaysBreakAfterDefinitionReturnType: All
+AlwaysBreakAfterReturnType: None
+
+# Function parameters & call arguments – one per line once wrapped
+BinPackArguments: false
+BinPackParameters: false
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false
+
+# Constructor initializer lists – stable formatting
+BreakConstructorInitializers: AfterColon
+PackConstructorInitializers: Never
+
+# Templates – clearer diffs
+AlwaysBreakTemplateDeclarations: Yes
+
+# Short statements – avoid single-line merges (better diffs)
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+
+# Spaces
+SpaceBeforeParens: ControlStatements
+SpaceBeforeAssignmentOperators: true
+SpaceInEmptyParentheses: false
+SpacesInContainerLiterals: true
+SpacesInAngles:  false
+
+# Pointer/reference alignment – consistent and less noisy
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# Includes – stable ordering
+SortIncludes: true
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex:           '^<.*>'
+    Priority:        1
+  - Regex:           '^".*"'
+    Priority:        2
+
+# Keep namespace endings compact but clear
+FixNamespaceComments: false
+CompactNamespaces: false
+
+# C++23-friendly formatting
+BreakBeforeConceptDeclarations: Always
+RequiresClausePosition: OwnLine
+
+# Lambdas
+AllowShortLambdasOnASingleLine: None
+
+# Switch formatting
+IndentCaseLabels: false
+IndentCaseBlocks: true
+
+# Keep empty lines stable
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+
+SeparateDefinitionBlocks: Always
+
+# Prevent reflowing comments (reduces noisy diffs)
+ReflowComments: false
+
+...

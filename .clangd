@@ -1,0 +1,5 @@
+CompileFlags:
+  Add: [-xc, -Wall, -Wextra, -Werror, -std=c23]
+  Compiler: gcc
+Documentation:
+  CommentFormat: Doxygen
