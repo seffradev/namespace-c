@@ -7,6 +7,9 @@ bind_ip := "192.168.10.2"
 bind_port := "12345"
 target_ip := "192.168.20.2"
 target_port := "12345"
+tun_name := "tun10"
+tun_ip := "192.168.30.2"
+tun_mask := "24"
 
 build:
     gcc -xc -Wall -Wextra -Werror -std=c23 -fuse-ld=mold -fsanitize=address -g -D_GNU_SOURCE main.c -o namespace
@@ -15,7 +18,7 @@ _build_no_asan:
     gcc -xc -Wall -Wextra -Werror -std=c23 -fuse-ld=mold -g -D_GNU_SOURCE main.c -o namespace
 
 run: build
-    sudo ./namespace {{ interface }} {{ namespace }} {{ vlan_id }} {{ gateway }} {{ bind_ip }} {{ mask }} {{ bind_port }} {{ target_ip }} {{ target_port }}
+    sudo ./namespace {{ interface }} {{ namespace }} {{ vlan_id }} {{ gateway }} {{ bind_ip }} {{ mask }} {{ bind_port }} {{ target_ip }} {{ target_port }} {{ tun_name }} {{ tun_ip }} {{ tun_mask }}
 
 valgrind: _build_no_asan
-    sudo valgrind -s --leak-check=full ./namespace {{ interface }} {{ namespace }} {{ vlan_id }} {{ gateway }} {{ bind_ip }} {{ mask }} {{ bind_port }} {{ target_ip }} {{ target_port }}
+    sudo valgrind -s --leak-check=full ./namespace {{ interface }} {{ namespace }} {{ vlan_id }} {{ gateway }} {{ bind_ip }} {{ mask }} {{ bind_port }} {{ target_ip }} {{ target_port }} {{ tun_name }} {{ tun_ip }} {{ tun_mask }}

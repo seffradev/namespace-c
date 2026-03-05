@@ -1,6 +1,8 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/if.h>
+#include <linux/if_tun.h>
 #include <netinet/in.h>
 #include <sched.h>
 #include <signal.h>
@@ -790,12 +792,27 @@ socket_create_udp_in_namespace(const char* namespace_name, struct sockaddr_in* a
 }
 
 /*!
+ * Write a message to TUN.
+ *
+ * @param tun_file_descriptor The socket to send via.
+ * @param address The address of the peer.
+ */
+void
+tun_handle_outgoing(int tun_file_descriptor, char* message, size_t size) {
+    int sent_length = write(tun_file_descriptor, message, size);
+
+    if (sent_length == -1) {
+        fprintf(stderr, "Failed to write message. Reason: %s\n", strerror(errno));
+    }
+}
+
+/*!
  * Receive a message from the provided file descriptor.
  *
  * @param udp_file_descriptor An open UDP file descriptor that is ready to be read.
  */
 void
-udp_handle_incoming(int udp_file_descriptor) {
+udp_handle_incoming(int udp_file_descriptor, int tun_file_descriptor) {
     char message[0xFFFF];
 
     struct sockaddr_in originating_address;
@@ -808,7 +825,7 @@ udp_handle_incoming(int udp_file_descriptor) {
                                       (struct sockaddr*)&originating_address,
                                       &originating_address_length);
 
-    printf("Received message with length %lu\n", received_length);
+    tun_handle_outgoing(tun_file_descriptor, message, received_length);
 }
 
 /*!
@@ -818,22 +835,32 @@ udp_handle_incoming(int udp_file_descriptor) {
  * @param address The address of the peer.
  */
 void
-udp_handle_outgoing(int udp_file_descriptor, struct sockaddr_in* address) {
-    char message[10];
-    memset(message, 'A', sizeof(message));
-
+udp_handle_outgoing(int udp_file_descriptor,
+                    struct sockaddr_in* address,
+                    char* message,
+                    size_t size) {
     int sent_length = sendto(udp_file_descriptor,
                              message,
-                             sizeof(message),
+                             size,
                              0,
                              (struct sockaddr*)address,
                              sizeof(struct sockaddr_in));
 
     if (sent_length == -1) {
         fprintf(stderr, "Failed to send message. Reason: %s\n", strerror(errno));
-    } else {
-        printf("Sent message of length %d\n", sent_length);
     }
+}
+
+/*!
+ * Receive a message from the provided file descriptor.
+ *
+ * @param tun_file_descriptor An open TUN file descriptor that is ready to be read.
+ */
+void
+tun_handle_incoming(int tun_file_descriptor, int udp_file_descriptor, struct sockaddr_in* address) {
+    char message[0xFFFF];
+    size_t received_length = read(tun_file_descriptor, message, sizeof(message));
+    udp_handle_outgoing(udp_file_descriptor, address, message, received_length);
 }
 
 /*!
@@ -842,6 +869,7 @@ udp_handle_outgoing(int udp_file_descriptor, struct sockaddr_in* address) {
  *
  * @param epoll_file_descriptor The target `epoll` file descriptor to wait on.
  * @param udp The UDP socket to send and receive on.
+ * @param tun The TUN socket to write and read from.
  * @param events The container of possible events.
  * @param address The target address to send packets to.
  * @returns If the function fails, it returns `false` to denote an exit and `true` to denote that it may remain active.
@@ -849,6 +877,7 @@ udp_handle_outgoing(int udp_file_descriptor, struct sockaddr_in* address) {
 bool
 event_wait_for(int epoll_file_descriptor,
                int udp,
+               int tun,
                struct epoll_event events[MAX_EVENTS],
                struct sockaddr_in* address) {
     int number_of_file_descriptors = epoll_wait(epoll_file_descriptor, events, MAX_EVENTS, -1);
@@ -859,11 +888,11 @@ event_wait_for(int epoll_file_descriptor,
 
     for (int i = 0; i < number_of_file_descriptors; ++i) {
         if ((events[i].events & EPOLLIN) != 0 && events[i].data.fd == udp) {
-            udp_handle_incoming(udp);
+            udp_handle_incoming(udp, tun);
         }
 
-        if ((events[i].events & EPOLLOUT) != 0 && events[i].data.fd == udp) {
-            udp_handle_outgoing(udp, address);
+        if ((events[i].events & EPOLLIN) != 0 && events[i].data.fd == tun) {
+            tun_handle_incoming(tun, udp, address);
         }
     }
 
@@ -911,6 +940,113 @@ address_get_from(const char* ip, unsigned int port) {
     return address;
 }
 
+int
+tun_create(const char* name) {
+    int file_descriptor = open("/dev/net/tun", O_RDWR);
+
+    if (file_descriptor == -1) {
+        fprintf(stderr, "Failed to open TUN device. Reason %s\n", strerror(errno));
+        return -1;
+    }
+
+    char* command = concatenate("ip tuntap add mode tun dev ", name);
+
+    if (command == NULL) {
+        fprintf(stderr, "Failed to prepare command");
+        return -1;
+    }
+
+    bool result = execute_command(command);
+    free(command);
+
+    if (!result) {
+        fprintf(stderr, "Failed to execute command");
+        close(file_descriptor);
+        return -1;
+    }
+
+    return file_descriptor;
+}
+
+bool
+tun_delete(const char* name) {
+    char* command = concatenate("ip tuntap del mode tun dev ", name);
+
+    if (command == NULL) {
+        fprintf(stderr, "Failed to prepare command");
+        return false;
+    }
+
+    bool result = execute_command(command);
+    free(command);
+
+    if (!result) {
+        fprintf(stderr, "Failed to execute command");
+        return false;
+    }
+
+    return true;
+}
+
+bool
+tun_start(int tun_file_descriptor, const char* name) {
+    char command_buffer[128];
+
+    int result = snprintf(command_buffer, sizeof(command_buffer), "ip link set dev %s up", name);
+
+    if (result <= 0) {
+        fprintf(stderr, "Failed to write to command buffer. Reason: %s\n", strerror(errno));
+        return false;
+    }
+
+    if (!execute_command(command_buffer)) {
+        fprintf(stderr, "Failed to execute command");
+        return false;
+    }
+
+    struct ifreq interface_request;
+    memset(&interface_request, 0, sizeof(interface_request));
+    strncpy(interface_request.ifr_name, name, IFNAMSIZ);
+    interface_request.ifr_flags = IFF_TUN | IFF_NO_PI;
+
+    result = ioctl(tun_file_descriptor, TUNSETIFF, &interface_request);
+
+    if (result < 0) {
+        fprintf(stderr,
+                "Failed to modify TUN interface with name %s. Reason: %s\n",
+                name,
+                strerror(errno));
+
+        return false;
+    }
+
+    return true;
+}
+
+bool
+tun_add_ip(const char* name, const char* ip, const int mask) {
+    char command_buffer[128];
+
+    int result = snprintf(command_buffer,
+                          sizeof(command_buffer),
+                          "ip addr add %s/%d dev %s",
+                          ip,
+                          mask,
+                          name);
+
+    if (result <= 0) {
+        fprintf(stderr, "Failed to write to command buffer. Reason: %s\n", strerror(errno));
+        return false;
+    }
+
+    if (!execute_command(command_buffer)) {
+        fprintf(stderr, "Failed to execute command");
+        return false;
+    }
+
+    return true;
+}
+
 volatile bool running = true;
 
 /*!
@@ -933,9 +1069,11 @@ main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (argc != 10) {
+    if (argc != 13) {
         printf("Usage: namespace <interface name> <namespace name> <vlan id> <default gateway> "
-               "<bind address> <bind port> <mask> <target address> <target port>\n");
+               "<bind address> <bind port> <mask> <target address> <target port> <tun name> "
+               "<tun "
+               "ip> <tun mask>\n");
         return 1;
     }
 
@@ -948,6 +1086,9 @@ main(int argc, char* argv[]) {
     unsigned int bind_port = atoi(argv[7]);
     const char* target_ip_address = argv[8];
     unsigned int target_port = atoi(argv[9]);
+    const char* tun_name = argv[10];
+    const char* tun_ip = argv[11];
+    unsigned int tun_mask = atoi(argv[12]);
 
     if (vlan_id <= 0) {
         fprintf(stderr, "VLAN ID must be non-zero and positive\n");
@@ -955,6 +1096,11 @@ main(int argc, char* argv[]) {
     }
 
     if (mask > 32) {
+        fprintf(stderr, "Mask must be in the range [0, 32]\n");
+        return 1;
+    }
+
+    if (tun_mask > 32) {
         fprintf(stderr, "Mask must be in the range [0, 32]\n");
         return 1;
     }
@@ -982,6 +1128,37 @@ main(int argc, char* argv[]) {
         return 1;
     }
 
+    int tun = tun_create(tun_name);
+    if (tun == -1) {
+        fprintf(stderr, "Failed to create TUN\n");
+        free(bind_address);
+        free(target_address);
+        return 1;
+    }
+
+    if (!tun_add_ip(tun_name, tun_ip, tun_mask)) {
+        fprintf(stderr,
+                "Failed to add IP address %s/%d to TUN named %s\n",
+                tun_ip,
+                tun_mask,
+                tun_name);
+
+        close(tun);
+        tun_delete(tun_name);
+        free(bind_address);
+        free(target_address);
+        return 1;
+    }
+
+    if (!tun_start(tun, tun_name)) {
+        fprintf(stderr, "Failed to start TUN named %s\n", tun_name);
+        close(tun);
+        tun_delete(tun_name);
+        free(bind_address);
+        free(target_address);
+        return 1;
+    }
+
     if (!namespace_and_vlan_setup(namespace_name,
                                   interface_name,
                                   vlan_id,
@@ -989,6 +1166,7 @@ main(int argc, char* argv[]) {
                                   bind_ip_address,
                                   mask)) {
         fprintf(stderr, "Failed to setup namespace %s and VLAN %d\n", namespace_name, vlan_id);
+        tun_delete(tun_name);
         free(bind_address);
         free(target_address);
         return -1;
@@ -1001,6 +1179,7 @@ main(int argc, char* argv[]) {
         fprintf(stderr, "Failed to create UDP socket in namespace %s\n", namespace_name);
 
         namespace_delete(namespace_name);
+        tun_delete(tun_name);
         free(target_address);
         return -1;
     }
@@ -1011,6 +1190,7 @@ main(int argc, char* argv[]) {
         close(udp);
 
         namespace_delete(namespace_name);
+        tun_delete(tun_name);
         free(target_address);
         return 1;
     }
@@ -1018,7 +1198,7 @@ main(int argc, char* argv[]) {
     struct epoll_event registered_event;
     struct epoll_event events[MAX_EVENTS];
 
-    registered_event.events = EPOLLIN | EPOLLOUT;
+    registered_event.events = EPOLLIN;
     registered_event.data.fd = udp;
     int result = epoll_ctl(epoll_file_descriptor, EPOLL_CTL_ADD, udp, &registered_event);
 
@@ -1026,18 +1206,30 @@ main(int argc, char* argv[]) {
         fprintf(stderr, "Failed to add UDP socket to epoll. Reason: %s\n", strerror(errno));
         close(epoll_file_descriptor);
         namespace_delete(namespace_name);
+        tun_delete(tun_name);
         free(target_address);
+        return 1;
+    }
 
+    registered_event.data.fd = tun;
+    result = epoll_ctl(epoll_file_descriptor, EPOLL_CTL_ADD, tun, &registered_event);
 
+    if (result == -1) {
+        fprintf(stderr, "Failed to add TUN socket to epoll. Reason: %s\n", strerror(errno));
+        close(epoll_file_descriptor);
+        namespace_delete(namespace_name);
+        tun_delete(tun_name);
+        free(target_address);
         return 1;
     }
 
     while (running) {
-        if (!event_wait_for(epoll_file_descriptor, udp, events, target_address)) {
+        if (!event_wait_for(epoll_file_descriptor, udp, tun, events, target_address)) {
             break;
         }
     }
 
     free(target_address);
     namespace_delete(namespace_name);
+    tun_delete(tun_name);
 }
