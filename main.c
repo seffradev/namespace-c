@@ -309,7 +309,7 @@ namespace_add_default_route_to_interface(const char* namespace_name,
 
     int result = snprintf(command_buffer,
                           sizeof(command_buffer),
-                          "ip netns exec %s ip route add default gw %s %s",
+                          "ip netns exec %s ip route add default via %s dev %s",
                           namespace_name,
                           ip_address,
                           interface_name);
@@ -677,6 +677,11 @@ socket_receive_from(int source) {
         return -1;
     }
 
+    if (control_message->cmsg_level != SOL_SOCKET) {
+        fprintf(stderr, "Received a message of incorrect level\n");
+        return -1;
+    }
+
     if (control_message->cmsg_type != SCM_RIGHTS) {
         fprintf(stderr, "Received a message of incorrect type\n");
         return -1;
@@ -818,12 +823,17 @@ udp_handle_incoming(int udp_file_descriptor, int tun_file_descriptor) {
     struct sockaddr_in originating_address;
     socklen_t originating_address_length = sizeof(originating_address);
 
-    size_t received_length = recvfrom(udp_file_descriptor,
-                                      message,
-                                      sizeof(message),
-                                      0,
-                                      (struct sockaddr*)&originating_address,
-                                      &originating_address_length);
+    ssize_t received_length = recvfrom(udp_file_descriptor,
+                                       message,
+                                       sizeof(message),
+                                       0,
+                                       (struct sockaddr*)&originating_address,
+                                       &originating_address_length);
+
+    if (received_length == -1) {
+        fprintf(stderr, "Failed receiving data over UDP. Reason: %s\n", strerror(errno));
+        return;
+    }
 
     tun_handle_outgoing(tun_file_descriptor, message, received_length);
 }
