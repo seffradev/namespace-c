@@ -12,6 +12,7 @@
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <wait.h>
 
@@ -39,333 +40,6 @@ concatenate(const char* lhs, const char* rhs) {
 
     strcpy(result, lhs);
     strcat(result, rhs);
-
-    return result;
-}
-
-/*!
- * Run a command by piping to a shell.
- *
- * @param command The command to execute
- * @returns `true` if the command could be run, `false` otherwise.
- */
-bool
-execute_command(const char* command) {
-    FILE* file;
-    char* redirected_command = concatenate(command, " 2>&1");
-
-    if (redirected_command == NULL) {
-        fprintf(stderr, "Failed to write redirected command. Reason: %s\n", strerror(errno));
-        return false;
-    }
-
-    printf("Executing: %s\n", redirected_command);
-
-    file = popen(redirected_command, "r");
-    if (file == 0) {
-        fprintf(stderr,
-                "Failed to execute command `%s`. Reason: %s\n",
-                redirected_command,
-                strerror(errno));
-
-        free(redirected_command);
-        return false;
-    }
-
-    char out_buffer[128];
-    size_t out_buffer_length = sizeof(out_buffer);
-
-    while (fgets(out_buffer, out_buffer_length, file) != NULL) {
-        const char* remove_error = "SIOCADDRT: File exists";
-
-        if (strstr(out_buffer, remove_error)) {
-            fprintf(stderr, "%s; %s\n", redirected_command, out_buffer);
-        }
-    }
-
-    pclose(file);
-    free(redirected_command);
-
-    return true;
-}
-
-/*!
- * Helper function for procuring an interface name of the format
- * `interface_name.vlan_id`. This allocates a new string owned by
- * the caller.
- *
- * @param interface_name The name of the interface the VLAN is tied
- * to.
- * @param vlan_id The VLAN ID.
- * @returns The interface name of the VLAN, or NULL on failure.
- */
-char*
-vlan_get_name(const char* interface_name, int vlan_id) {
-    char vlan_id_string[10];
-    snprintf(vlan_id_string, sizeof(vlan_id_string), "%d", vlan_id);
-
-    size_t interface_name_length = strlen(interface_name);
-    size_t vlan_id_length = strlen(vlan_id_string);
-
-    size_t vlan_name_length = interface_name_length + vlan_id_length + 2;
-
-    char* vlan_name = (char*)malloc(vlan_name_length);
-
-    if (vlan_name == NULL) {
-        fprintf(stderr, "Failed to allocate memory for VLAN name. Reason: %s\n", strerror(errno));
-        return NULL;
-    }
-
-    int result = snprintf(vlan_name, vlan_name_length, "%s.%s", interface_name, vlan_id_string);
-
-    if (result < 0) {
-        fprintf(stderr, "Failed to create VLAN interface name\n");
-        return NULL;
-    }
-
-    return vlan_name;
-}
-
-/*!
- * Creates a new VLAN.
- *
- * @param interface_name The interface to create the VLAN on.
- * @param vlan_id The VLAN ID to create.
- * @returns Whether or not the VLAN was successfully created.
- */
-bool
-vlan_create(const char* interface_name, const char* vlan_name, int vlan_id) {
-    char command_buffer[128];
-
-    int result = snprintf(command_buffer,
-                          sizeof(command_buffer),
-                          "ip link add link %s name %s type vlan id %d",
-                          interface_name,
-                          vlan_name,
-                          vlan_id);
-
-    if (result <= 0) {
-        fprintf(stderr, "Failed to write to command buffer. Reason: %s\n", strerror(errno));
-        return false;
-    }
-
-    if (!execute_command(command_buffer)) {
-        fprintf(stderr, "Failed to execute command");
-        return false;
-    }
-
-    return true;
-}
-
-/*!
- * Start the interface given by `interface_name` that exists in
- * namespace given by `namespace_name`.
- *
- * @param namespace_name The namespace to start the interface in.
- * @param interface_name The interface to start.
- * @returns `true` if the interface was started; `false` if the attempt failed.
- */
-bool
-namespace_start_interface(const char* namespace_name, const char* interface_name) {
-    char command_buffer[128];
-
-    int result = snprintf(command_buffer,
-                          sizeof(command_buffer),
-                          "ip netns exec %s ip link set %s up",
-                          namespace_name,
-                          interface_name);
-
-    if (result <= 0) {
-        fprintf(stderr, "Failed to write to command buffer. Reason: %s\n", strerror(errno));
-        return false;
-    }
-
-    if (!execute_command(command_buffer)) {
-        fprintf(stderr, "Failed to execute command");
-        return false;
-    }
-
-    return true;
-}
-
-/*!
- * Deletes the VLAN identified by `vlan_name`.
- *
- * @param interface_name
- * @param vlan_id
- * @returns
- */
-bool
-vlan_delete(const char* vlan_name) {
-    char* command = concatenate("ip link del ", vlan_name);
-
-    if (command == NULL) {
-        fprintf(stderr, "Failed to concatenate command. Reason: %s\n", strerror(errno));
-        return false;
-    }
-
-    bool result = execute_command(command);
-    free(command);
-
-    if (!result) {
-        fprintf(stderr, "Failed to execute command");
-        return false;
-    }
-
-    return true;
-}
-
-/*!
- *
- *
- * @param interface_name
- * @param vlan_id
- * @param namespace_name
- * @returns Whether or not the move was successful.
- */
-bool
-vlan_move_into_namespace(const char* vlan_name, const char* namespace_name) {
-    char command_buffer[128];
-
-    int result = snprintf(command_buffer,
-                          sizeof(command_buffer),
-                          "ip link set %s netns %s",
-                          vlan_name,
-                          namespace_name);
-
-    if (result <= 0) {
-        fprintf(stderr, "Failed to write to command buffer. Reason: %s\n", strerror(errno));
-        return false;
-    }
-
-    if (!execute_command(command_buffer)) {
-        fprintf(stderr, "Failed to execute command");
-        return false;
-    }
-
-    if (!namespace_start_interface(namespace_name, vlan_name)) {
-        fprintf(stderr, "Failed to start interface %s in namespace %s", vlan_name, namespace_name);
-        return false;
-    }
-
-    if (!namespace_start_interface(namespace_name, "lo")) {
-        fprintf(stderr, "Failed to start interface lo in namespace %s", namespace_name);
-        return false;
-    }
-
-    return true;
-}
-
-/*!
- *
- *
- * @param namespace_name
- * @param interface_name
- * @param ip_address
- * @param mask
- * @returns
- */
-bool
-namespace_add_ip_to_interface(const char* namespace_name,
-                              const char* interface_name,
-                              const char* ip_address,
-                              int mask) {
-    char command_buffer[128];
-
-    int result = snprintf(command_buffer,
-                          sizeof(command_buffer),
-                          "ip netns exec %s ip addr add %s/%d dev %s",
-                          namespace_name,
-                          ip_address,
-                          mask,
-                          interface_name);
-
-    if (result <= 0) {
-        fprintf(stderr, "Failed to write to command buffer. Reason: %s\n", strerror(errno));
-        return false;
-    }
-
-    if (!execute_command(command_buffer)) {
-        fprintf(stderr, "Failed to execute command");
-        return false;
-    }
-
-    return true;
-}
-
-/*!
- *
- *
- * @param namespace_name
- * @param ip_address
- * @param interface_name
- * @returns
- */
-bool
-namespace_add_default_route_to_interface(const char* namespace_name,
-                                         const char* ip_address,
-                                         const char* interface_name) {
-    char command_buffer[128];
-
-    int result = snprintf(command_buffer,
-                          sizeof(command_buffer),
-                          "ip netns exec %s ip route add default via %s dev %s",
-                          namespace_name,
-                          ip_address,
-                          interface_name);
-
-    if (result <= 0) {
-        fprintf(stderr, "Failed to write to command buffer. Reason: %s\n", strerror(errno));
-        return false;
-    }
-
-    if (!execute_command(command_buffer)) {
-        fprintf(stderr, "Failed to execute command");
-        return false;
-    }
-
-    return true;
-}
-
-/*!
- *
- *
- * @param namespace_name
- * @returns
- */
-bool
-namespace_create(const char* namespace_name) {
-    const char* base_command = "ip netns add ";
-    char* command = concatenate(base_command, namespace_name);
-
-    if (command == NULL) {
-        fprintf(stderr, "Failed to concatenate command. Reason: %s\n", strerror(errno));
-        return false;
-    }
-
-    bool result = execute_command(command);
-    free(command);
-
-    return result;
-}
-
-/*!
- *
- *
- * @param namespace_name
- * @returns
- */
-bool
-namespace_delete(const char* namespace_name) {
-    char* command = concatenate("ip netns del ", namespace_name);
-
-    if (command == NULL) {
-        fprintf(stderr, "Failed to concatenate command. Reason: %s\n", strerror(errno));
-        return false;
-    }
-
-    bool result = execute_command(command);
-    free(command);
 
     return result;
 }
@@ -406,21 +80,6 @@ namespace_open(const char* namespace_path) {
 }
 
 /*!
- *
- *
- * @returns
- */
-int
-namespace_get_current() {
-    int file_descriptor = namespace_open("/proc/self/ns/net");
-    if (file_descriptor == -1) {
-        return -1;
-    }
-
-    return file_descriptor;
-}
-
-/*!
  * Move the current thread into the namespace referred to by
  * `namespace_file_descriptor`.
  *
@@ -435,122 +94,6 @@ namespace_enter(int namespace_file_descriptor) {
         return false;
     }
 
-    return true;
-}
-
-/*!
- *
- *
- * @param namespace_name
- * @param interface_name
- * @param vlan_id
- * @returns
- */
-bool
-namespace_create_vlan(const char* namespace_name,
-                      const char* interface_name,
-                      const char* vlan_name,
-                      int vlan_id) {
-    if (!vlan_create(interface_name, vlan_name, vlan_id)) {
-        fprintf(stderr,
-                "Failed to create VLAN named %s with ID %d on interface %s",
-                vlan_name,
-                vlan_id,
-                interface_name);
-
-        return false;
-    }
-
-    if (!vlan_move_into_namespace(vlan_name, namespace_name)) {
-        fprintf(stderr,
-                "Failed to move VLAN named %s with ID %d on interface %s to namespace %s",
-                vlan_name,
-                vlan_id,
-                interface_name,
-                namespace_name);
-
-        bool is_vlan_deleted = vlan_delete(vlan_name);
-
-        if (!is_vlan_deleted) {
-            fprintf(stderr,
-                    "Failed to delete VLAN named %s with ID %d on interface %s\n",
-                    vlan_name,
-                    vlan_id,
-                    interface_name);
-        }
-
-        return false;
-    }
-
-    return true;
-}
-
-/*!
- *
- *
- * @param namespace_name
- * @param interface_name
- * @param vlan_id
- * @param default_gateway
- * @param ip_address
- * @param mask
- * @returns
- */
-bool
-namespace_and_vlan_setup(const char* namespace_name,
-                         const char* interface_name,
-                         int vlan_id,
-                         const char* default_gateway,
-                         const char* ip_address,
-                         int mask) {
-    char* vlan_name = vlan_get_name(interface_name, vlan_id);
-    if (vlan_name == NULL) {
-        return false;
-    }
-
-    if (!namespace_create(namespace_name)) {
-        fprintf(stderr, "Failed to create namespace with name %s\n", namespace_name);
-        free(vlan_name);
-        return false;
-    }
-
-    if (!namespace_create_vlan(namespace_name, interface_name, vlan_name, vlan_id)) {
-        if (!namespace_delete(namespace_name)) {
-            fprintf(stderr, "Failed to delete namespace %s\n", namespace_name);
-        }
-
-        free(vlan_name);
-        return false;
-    }
-
-    if (!namespace_add_ip_to_interface(namespace_name, vlan_name, ip_address, mask)) {
-        fprintf(stderr,
-                "Failed to add IP address %s/%d to interface %s in namespace %s\n",
-                ip_address,
-                mask,
-                interface_name,
-                namespace_name);
-
-        if (!namespace_delete(namespace_name)) {
-            fprintf(stderr, "Failed to delete namespace %s\n", namespace_name);
-        }
-
-        free(vlan_name);
-        return false;
-    }
-
-    if (!namespace_add_default_route_to_interface(namespace_name, default_gateway, vlan_name)) {
-        fprintf(stderr,
-                "Failed to add default route %s to interface %s in namespace %s\n",
-                default_gateway,
-                vlan_name,
-                namespace_name);
-
-        free(vlan_name);
-        return false;
-    }
-
-    free(vlan_name);
     return true;
 }
 
@@ -849,16 +392,19 @@ udp_handle_outgoing(int udp_file_descriptor,
                     struct sockaddr_in* address,
                     char* message,
                     size_t size) {
-    int sent_length = sendto(udp_file_descriptor,
-                             message,
-                             size,
-                             0,
-                             (struct sockaddr*)address,
-                             sizeof(struct sockaddr_in));
+    ssize_t sent_length = sendto(udp_file_descriptor,
+                                 message,
+                                 size,
+                                 0,
+                                 (struct sockaddr*)address,
+                                 sizeof(struct sockaddr_in));
 
     if (sent_length == -1) {
         fprintf(stderr, "Failed to send message. Reason: %s\n", strerror(errno));
+        return;
     }
+
+    printf("Sent %ld bytes of data\n", sent_length);
 }
 
 /*!
@@ -951,7 +497,7 @@ address_get_from(const char* ip, unsigned int port) {
 }
 
 int
-tun_create(const char* name) {
+tun_open(const char* name) {
     int file_descriptor = open("/dev/net/tun", O_RDWR);
 
     if (file_descriptor == -1) {
@@ -959,102 +505,23 @@ tun_create(const char* name) {
         return -1;
     }
 
-    char* command = concatenate("ip tuntap add mode tun dev ", name);
-
-    if (command == NULL) {
-        fprintf(stderr, "Failed to prepare command");
-        return -1;
-    }
-
-    bool result = execute_command(command);
-    free(command);
-
-    if (!result) {
-        fprintf(stderr, "Failed to execute command");
-        close(file_descriptor);
-        return -1;
-    }
-
-    return file_descriptor;
-}
-
-bool
-tun_delete(const char* name) {
-    char* command = concatenate("ip tuntap del mode tun dev ", name);
-
-    if (command == NULL) {
-        fprintf(stderr, "Failed to prepare command");
-        return false;
-    }
-
-    bool result = execute_command(command);
-    free(command);
-
-    if (!result) {
-        fprintf(stderr, "Failed to execute command");
-        return false;
-    }
-
-    return true;
-}
-
-bool
-tun_start(int tun_file_descriptor, const char* name) {
-    char command_buffer[128];
-
-    int result = snprintf(command_buffer, sizeof(command_buffer), "ip link set dev %s up", name);
-
-    if (result <= 0) {
-        fprintf(stderr, "Failed to write to command buffer. Reason: %s\n", strerror(errno));
-        return false;
-    }
-
-    if (!execute_command(command_buffer)) {
-        fprintf(stderr, "Failed to execute command");
-        return false;
-    }
-
     struct ifreq interface_request;
     memset(&interface_request, 0, sizeof(interface_request));
     strncpy(interface_request.ifr_name, name, IFNAMSIZ);
     interface_request.ifr_flags = IFF_TUN | IFF_NO_PI;
 
-    result = ioctl(tun_file_descriptor, TUNSETIFF, &interface_request);
-
+    int result = ioctl(file_descriptor, TUNSETIFF, &interface_request);
     if (result < 0) {
         fprintf(stderr,
                 "Failed to modify TUN interface with name %s. Reason: %s\n",
                 name,
                 strerror(errno));
 
-        return false;
+        close(file_descriptor);
+        return -1;
     }
 
-    return true;
-}
-
-bool
-tun_add_ip(const char* name, const char* ip, const int mask) {
-    char command_buffer[128];
-
-    int result = snprintf(command_buffer,
-                          sizeof(command_buffer),
-                          "ip addr add %s/%d dev %s",
-                          ip,
-                          mask,
-                          name);
-
-    if (result <= 0) {
-        fprintf(stderr, "Failed to write to command buffer. Reason: %s\n", strerror(errno));
-        return false;
-    }
-
-    if (!execute_command(command_buffer)) {
-        fprintf(stderr, "Failed to execute command");
-        return false;
-    }
-
-    return true;
+    return file_descriptor;
 }
 
 volatile bool running = true;
@@ -1079,41 +546,18 @@ main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (argc != 13) {
-        printf("Usage: namespace <interface name> <namespace name> <vlan id> <default gateway> "
-               "<bind address> <bind port> <mask> <target address> <target port> <tun name> "
-               "<tun "
-               "ip> <tun mask>\n");
+    if (argc != 7) {
+        printf("Usage: namespace <namespace name> <bind address> <bind port> <target "
+               "address> <target port> <tun name>\n");
         return 1;
     }
 
-    const char* interface_name = argv[1];
-    const char* namespace_name = argv[2];
-    unsigned int vlan_id = atoi(argv[3]);
-    const char* default_gateway = argv[4];
-    const char* bind_ip_address = argv[5];
-    unsigned int mask = atoi(argv[6]);
-    unsigned int bind_port = atoi(argv[7]);
-    const char* target_ip_address = argv[8];
-    unsigned int target_port = atoi(argv[9]);
-    const char* tun_name = argv[10];
-    const char* tun_ip = argv[11];
-    unsigned int tun_mask = atoi(argv[12]);
-
-    if (vlan_id <= 0) {
-        fprintf(stderr, "VLAN ID must be non-zero and positive\n");
-        return 1;
-    }
-
-    if (mask > 32) {
-        fprintf(stderr, "Mask must be in the range [0, 32]\n");
-        return 1;
-    }
-
-    if (tun_mask > 32) {
-        fprintf(stderr, "Mask must be in the range [0, 32]\n");
-        return 1;
-    }
+    const char* namespace_name = argv[1];
+    const char* bind_ip_address = argv[2];
+    unsigned int bind_port = atoi(argv[3]);
+    const char* target_ip_address = argv[4];
+    unsigned int target_port = atoi(argv[5]);
+    const char* tun_name = argv[6];
 
     if (bind_port > 65535) {
         fprintf(stderr, "Bind port must be in the range [0, 65535]\n");
@@ -1138,48 +582,12 @@ main(int argc, char* argv[]) {
         return 1;
     }
 
-    int tun = tun_create(tun_name);
+    int tun = tun_open(tun_name);
     if (tun == -1) {
-        fprintf(stderr, "Failed to create TUN\n");
+        fprintf(stderr, "Failed to open TUN\n");
         free(bind_address);
         free(target_address);
         return 1;
-    }
-
-    if (!tun_add_ip(tun_name, tun_ip, tun_mask)) {
-        fprintf(stderr,
-                "Failed to add IP address %s/%d to TUN named %s\n",
-                tun_ip,
-                tun_mask,
-                tun_name);
-
-        close(tun);
-        tun_delete(tun_name);
-        free(bind_address);
-        free(target_address);
-        return 1;
-    }
-
-    if (!tun_start(tun, tun_name)) {
-        fprintf(stderr, "Failed to start TUN named %s\n", tun_name);
-        close(tun);
-        tun_delete(tun_name);
-        free(bind_address);
-        free(target_address);
-        return 1;
-    }
-
-    if (!namespace_and_vlan_setup(namespace_name,
-                                  interface_name,
-                                  vlan_id,
-                                  default_gateway,
-                                  bind_ip_address,
-                                  mask)) {
-        fprintf(stderr, "Failed to setup namespace %s and VLAN %d\n", namespace_name, vlan_id);
-        tun_delete(tun_name);
-        free(bind_address);
-        free(target_address);
-        return -1;
     }
 
     int udp = socket_create_udp_in_namespace(namespace_name, bind_address);
@@ -1188,8 +596,6 @@ main(int argc, char* argv[]) {
     if (udp == -1) {
         fprintf(stderr, "Failed to create UDP socket in namespace %s\n", namespace_name);
 
-        namespace_delete(namespace_name);
-        tun_delete(tun_name);
         free(target_address);
         return -1;
     }
@@ -1199,8 +605,6 @@ main(int argc, char* argv[]) {
         fprintf(stderr, "Could not set up epoll. Reason: %s\n", strerror(errno));
         close(udp);
 
-        namespace_delete(namespace_name);
-        tun_delete(tun_name);
         free(target_address);
         return 1;
     }
@@ -1215,8 +619,6 @@ main(int argc, char* argv[]) {
     if (result == -1) {
         fprintf(stderr, "Failed to add UDP socket to epoll. Reason: %s\n", strerror(errno));
         close(epoll_file_descriptor);
-        namespace_delete(namespace_name);
-        tun_delete(tun_name);
         free(target_address);
         return 1;
     }
@@ -1227,8 +629,6 @@ main(int argc, char* argv[]) {
     if (result == -1) {
         fprintf(stderr, "Failed to add TUN socket to epoll. Reason: %s\n", strerror(errno));
         close(epoll_file_descriptor);
-        namespace_delete(namespace_name);
-        tun_delete(tun_name);
         free(target_address);
         return 1;
     }
@@ -1240,6 +640,4 @@ main(int argc, char* argv[]) {
     }
 
     free(target_address);
-    namespace_delete(namespace_name);
-    tun_delete(tun_name);
 }
