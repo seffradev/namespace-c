@@ -340,52 +340,12 @@ socket_create_udp_in_namespace(const char* namespace_name, struct sockaddr_in* a
 }
 
 /*!
- * Write a message to TUN.
- *
- * @param tun_file_descriptor The socket to send via.
- * @param address The address of the peer.
- */
-void
-tun_handle_outgoing(int tun_file_descriptor, char* message, size_t size) {
-    int sent_length = write(tun_file_descriptor, message, size);
-
-    if (sent_length == -1) {
-        fprintf(stderr, "Failed to write message. Reason: %s\n", strerror(errno));
-    }
-}
-
-/*!
- * Receive a message from the provided file descriptor.
- *
- * @param udp_file_descriptor An open UDP file descriptor that is ready to be read.
- */
-void
-udp_handle_incoming(int udp_file_descriptor, int tun_file_descriptor) {
-    char message[0xFFFF];
-
-    struct sockaddr_in originating_address;
-    socklen_t originating_address_length = sizeof(originating_address);
-
-    ssize_t received_length = recvfrom(udp_file_descriptor,
-                                       message,
-                                       sizeof(message),
-                                       0,
-                                       (struct sockaddr*)&originating_address,
-                                       &originating_address_length);
-
-    if (received_length == -1) {
-        fprintf(stderr, "Failed receiving data over UDP. Reason: %s\n", strerror(errno));
-        return;
-    }
-
-    tun_handle_outgoing(tun_file_descriptor, message, received_length);
-}
-
-/*!
  * Send a message over UDP to `address`.
  *
  * @param udp_file_descriptor The socket to send via.
  * @param address The address of the peer.
+ * @param message A pointer to the message to send.
+ * @param size The length of the message.
  */
 void
 udp_handle_outgoing(int udp_file_descriptor,
@@ -410,12 +370,29 @@ udp_handle_outgoing(int udp_file_descriptor,
 /*!
  * Receive a message from the provided file descriptor.
  *
- * @param tun_file_descriptor An open TUN file descriptor that is ready to be read.
+ * @param udp_file_descriptor An open UDP file descriptor that is ready to be read.
  */
 void
-tun_handle_incoming(int tun_file_descriptor, int udp_file_descriptor, struct sockaddr_in* address) {
+udp_handle_incoming(int udp_file_descriptor, struct sockaddr_in* address) {
     char message[0xFFFF];
-    size_t received_length = read(tun_file_descriptor, message, sizeof(message));
+
+    struct sockaddr_in originating_address;
+    socklen_t originating_address_length = sizeof(originating_address);
+
+    ssize_t received_length = recvfrom(udp_file_descriptor,
+                                       message,
+                                       sizeof(message),
+                                       0,
+                                       (struct sockaddr*)&originating_address,
+                                       &originating_address_length);
+
+    if (received_length == -1) {
+        fprintf(stderr, "Failed receiving data over UDP. Reason: %s\n", strerror(errno));
+        return;
+    }
+
+    printf("Received %ld bytes of data\n", received_length);
+
     udp_handle_outgoing(udp_file_descriptor, address, message, received_length);
 }
 
@@ -433,7 +410,6 @@ tun_handle_incoming(int tun_file_descriptor, int udp_file_descriptor, struct soc
 bool
 event_wait_for(int epoll_file_descriptor,
                int udp,
-               int tun,
                struct epoll_event events[MAX_EVENTS],
                struct sockaddr_in* address) {
     int number_of_file_descriptors = epoll_wait(epoll_file_descriptor, events, MAX_EVENTS, -1);
@@ -444,11 +420,7 @@ event_wait_for(int epoll_file_descriptor,
 
     for (int i = 0; i < number_of_file_descriptors; ++i) {
         if ((events[i].events & EPOLLIN) != 0 && events[i].data.fd == udp) {
-            udp_handle_incoming(udp, tun);
-        }
-
-        if ((events[i].events & EPOLLIN) != 0 && events[i].data.fd == tun) {
-            tun_handle_incoming(tun, udp, address);
+            udp_handle_incoming(udp, address);
         }
     }
 
@@ -548,7 +520,7 @@ main(int argc, char* argv[]) {
 
     if (argc != 7) {
         printf("Usage: namespace <namespace name> <bind address> <bind port> <target "
-               "address> <target port> <tun name>\n");
+               "address> <target port>\n");
         return 1;
     }
 
@@ -557,7 +529,6 @@ main(int argc, char* argv[]) {
     unsigned int bind_port = atoi(argv[3]);
     const char* target_ip_address = argv[4];
     unsigned int target_port = atoi(argv[5]);
-    const char* tun_name = argv[6];
 
     if (bind_port > 65535) {
         fprintf(stderr, "Bind port must be in the range [0, 65535]\n");
@@ -579,14 +550,6 @@ main(int argc, char* argv[]) {
     if (target_address == NULL) {
         fprintf(stderr, "Failed to get internet target address\n");
         free(bind_address);
-        return 1;
-    }
-
-    int tun = tun_open(tun_name);
-    if (tun == -1) {
-        fprintf(stderr, "Failed to open TUN\n");
-        free(bind_address);
-        free(target_address);
         return 1;
     }
 
@@ -623,18 +586,8 @@ main(int argc, char* argv[]) {
         return 1;
     }
 
-    registered_event.data.fd = tun;
-    result = epoll_ctl(epoll_file_descriptor, EPOLL_CTL_ADD, tun, &registered_event);
-
-    if (result == -1) {
-        fprintf(stderr, "Failed to add TUN socket to epoll. Reason: %s\n", strerror(errno));
-        close(epoll_file_descriptor);
-        free(target_address);
-        return 1;
-    }
-
     while (running) {
-        if (!event_wait_for(epoll_file_descriptor, udp, tun, events, target_address)) {
+        if (!event_wait_for(epoll_file_descriptor, udp, events, target_address)) {
             break;
         }
     }
