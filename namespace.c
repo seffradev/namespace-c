@@ -45,7 +45,8 @@ concatenate(const char* lhs, const char* rhs) {
 }
 
 /*!
- *
+ * Get the full path to the given namespace. The base path is
+ * `/var/run/netns/`.
  *
  * @param namespace_name
  * @returns
@@ -67,7 +68,7 @@ namespace_get_path(const char* namespace_name) {
  *
  *
  * @param namespace_path
- * @returns
+ * @returns The opened namespace file descriptor
  */
 int
 namespace_open(const char* namespace_path) {
@@ -370,16 +371,18 @@ udp_handle_outgoing(int udp_file_descriptor,
 /*!
  * Receive a message from the provided file descriptor.
  *
- * @param udp_file_descriptor An open UDP file descriptor that is ready to be read.
+ * @param udp_in An open UDP file descriptor that is ready to be read.
+ * @param udp_out An open UDP file descriptor to write to.
+ * @param address The target address to send to.
  */
 void
-udp_handle_incoming(int udp_file_descriptor, struct sockaddr_in* address) {
+udp_handle_incoming(int udp_in, int udp_out, struct sockaddr_in* address) {
     char message[0xFFFF];
 
     struct sockaddr_in originating_address;
     socklen_t originating_address_length = sizeof(originating_address);
 
-    ssize_t received_length = recvfrom(udp_file_descriptor,
+    ssize_t received_length = recvfrom(udp_in,
                                        message,
                                        sizeof(message),
                                        0,
@@ -393,7 +396,7 @@ udp_handle_incoming(int udp_file_descriptor, struct sockaddr_in* address) {
 
     printf("Received %ld bytes of data\n", received_length);
 
-    udp_handle_outgoing(udp_file_descriptor, address, message, received_length);
+    udp_handle_outgoing(udp_out, address, message, received_length);
 }
 
 /*!
@@ -402,6 +405,7 @@ udp_handle_incoming(int udp_file_descriptor, struct sockaddr_in* address) {
  *
  * @param epoll_file_descriptor The target `epoll` file descriptor to wait on.
  * @param udp The UDP socket to send and receive on.
+ * @param namespaced_udp The UDP socket bound in a namespace to send and receive on.
  * @param tun The TUN socket to write and read from.
  * @param events The container of possible events.
  * @param address The target address to send packets to.
@@ -410,8 +414,10 @@ udp_handle_incoming(int udp_file_descriptor, struct sockaddr_in* address) {
 bool
 event_wait_for(int epoll_file_descriptor,
                int udp,
+               int namespaced_udp,
                struct epoll_event events[MAX_EVENTS],
-               struct sockaddr_in* address) {
+               struct sockaddr_in* address,
+               struct sockaddr_in* namespaced_address) {
     int number_of_file_descriptors = epoll_wait(epoll_file_descriptor, events, MAX_EVENTS, -1);
     if (number_of_file_descriptors == -1) {
         fprintf(stderr, "Failed to wait for events. Reason: %s\n", strerror(errno));
@@ -419,8 +425,12 @@ event_wait_for(int epoll_file_descriptor,
     }
 
     for (int i = 0; i < number_of_file_descriptors; ++i) {
+        if ((events[i].events & EPOLLIN) != 0 && events[i].data.fd == namespaced_udp) {
+            udp_handle_incoming(namespaced_udp, udp, address);
+        }
+
         if ((events[i].events & EPOLLIN) != 0 && events[i].data.fd == udp) {
-            udp_handle_incoming(udp, address);
+            udp_handle_incoming(udp, namespaced_udp, namespaced_address);
         }
     }
 
@@ -518,17 +528,27 @@ main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (argc != 7) {
-        printf("Usage: namespace <namespace name> <bind address> <bind port> <target "
-               "address> <target port>\n");
+    if (argc != 10) {
+        printf("Usage: namespace <namespace name> <bind address> <bind port> <namespace bind "
+               "address> <namespace bind port> <target "
+               "address> <target port> <namespaced target address> <namespaced target port>\n");
         return 1;
     }
 
     const char* namespace_name = argv[1];
     const char* bind_ip_address = argv[2];
     unsigned int bind_port = atoi(argv[3]);
-    const char* target_ip_address = argv[4];
-    unsigned int target_port = atoi(argv[5]);
+    const char* namespace_bind_ip_address = argv[4];
+    unsigned int namespace_bind_port = atoi(argv[5]);
+    const char* target_ip_address = argv[6];
+    unsigned int target_port = atoi(argv[7]);
+    const char* target_namespaced_ip_address = argv[8];
+    unsigned int target_namespaced_port = atoi(argv[9]);
+
+    if (namespace_bind_port > 65535) {
+        fprintf(stderr, "Bind port must be in the range [0, 65535]\n");
+        return 1;
+    }
 
     if (bind_port > 65535) {
         fprintf(stderr, "Bind port must be in the range [0, 65535]\n");
@@ -540,35 +560,72 @@ main(int argc, char* argv[]) {
         return 1;
     }
 
+    if (target_namespaced_port > 65535) {
+        fprintf(stderr, "Namespaced target port must be in the range [0, 65535]\n");
+        return 1;
+    }
+
     struct sockaddr_in* bind_address = address_get_from(bind_ip_address, bind_port);
     if (bind_address == NULL) {
         fprintf(stderr, "Failed to get internet bind address\n");
         return 1;
     }
 
-    struct sockaddr_in* target_address = address_get_from(target_ip_address, target_port);
-    if (target_address == NULL) {
-        fprintf(stderr, "Failed to get internet target address\n");
+    struct sockaddr_in* namespace_bind_address =
+            address_get_from(namespace_bind_ip_address, namespace_bind_port);
+    if (namespace_bind_address == NULL) {
+        fprintf(stderr, "Failed to get internet bind address\n");
         free(bind_address);
         return 1;
     }
 
-    int udp = socket_create_udp_in_namespace(namespace_name, bind_address);
+    struct sockaddr_in* target_address = address_get_from(target_ip_address, target_port);
+    if (target_address == NULL) {
+        fprintf(stderr, "Failed to get internet target address\n");
+        free(namespace_bind_address);
+        free(bind_address);
+        return 1;
+    }
+
+    struct sockaddr_in* target_namespaced_address =
+            address_get_from(target_namespaced_ip_address, target_namespaced_port);
+    if (target_namespaced_address == NULL) {
+        fprintf(stderr, "Failed to get internet target address\n");
+        free(target_address);
+        free(namespace_bind_address);
+        free(bind_address);
+        return 1;
+    }
+
+    int udp = socket_create_udp(bind_address);
     free(bind_address);
 
     if (udp == -1) {
-        fprintf(stderr, "Failed to create UDP socket in namespace %s\n", namespace_name);
-
+        fprintf(stderr, "Failed to create UDP socket\n");
+        free(namespace_bind_address);
         free(target_address);
+        free(target_namespaced_address);
+        return -1;
+    }
+
+    int namespace_udp = socket_create_udp_in_namespace(namespace_name, namespace_bind_address);
+    free(namespace_bind_address);
+
+    if (namespace_udp == -1) {
+        fprintf(stderr, "Failed to create UDP socket in namespace %s\n", namespace_name);
+        close(udp);
+        free(target_address);
+        free(target_namespaced_address);
         return -1;
     }
 
     int epoll_file_descriptor = epoll_create1(0);
     if (epoll_file_descriptor == -1) {
         fprintf(stderr, "Could not set up epoll. Reason: %s\n", strerror(errno));
+        close(namespace_udp);
         close(udp);
-
         free(target_address);
+        free(target_namespaced_address);
         return 1;
     }
 
@@ -582,15 +639,37 @@ main(int argc, char* argv[]) {
     if (result == -1) {
         fprintf(stderr, "Failed to add UDP socket to epoll. Reason: %s\n", strerror(errno));
         close(epoll_file_descriptor);
+        close(namespace_udp);
+        close(udp);
+        free(target_namespaced_address);
+        free(target_address);
+        return 1;
+    }
+
+    registered_event.data.fd = namespace_udp;
+    result = epoll_ctl(epoll_file_descriptor, EPOLL_CTL_ADD, namespace_udp, &registered_event);
+
+    if (result == -1) {
+        fprintf(stderr, "Failed to add UDP socket to epoll. Reason: %s\n", strerror(errno));
+        close(epoll_file_descriptor);
+        close(namespace_udp);
+        close(udp);
+        free(target_namespaced_address);
         free(target_address);
         return 1;
     }
 
     while (running) {
-        if (!event_wait_for(epoll_file_descriptor, udp, events, target_address)) {
+        if (!event_wait_for(epoll_file_descriptor,
+                            udp,
+                            namespace_udp,
+                            events,
+                            target_address,
+                            target_namespaced_address)) {
             break;
         }
     }
 
     free(target_address);
+    free(target_namespaced_address);
 }
